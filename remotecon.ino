@@ -205,7 +205,10 @@ unsigned long sendNTPpacket(byte *address)
 
   // all NTP fields have been given values, now
   // you can send a packet requesting a timestamp:
-  Udp.sendPacket( packetBuffer,NTP_PACKET_SIZE,  address, 123); //NTP requests are to port 123
+  Udp.beginPacket(address, 123); //NTP requests are to port 123
+  Udp.write(packetBuffer, NTP_PACKET_SIZE);
+  Udp.endPacket();
+  //Udp.sendPacket( packetBuffer,NTP_PACKET_SIZE,  address, 123); //NTP requests are to port 123
 } 
 
 
@@ -222,7 +225,7 @@ unsigned long getNTPtime()
 {  
   Serial.println("Time synchronization starting");  
   //IPAddress timeServer(64,147,116,229); // time.nist.gov NTP server  
-  sendNTPpacket(byte *(cfg.ntp_ip_addr); // send an NTP packet to a time server  
+  sendNTPpacket((byte *)cfg.ntp_ip_addr); // send an NTP packet to a time server  
   delay(1000);   
   if ( Udp.parsePacket() ) {   
    // We've received a packet, read the data from it  
