@@ -1,7 +1,10 @@
 #include <UC1701.h>
 #include <SPI.h>
 #include <EthernetIndustruino.h>
+#include <EthernetUdp.h>
 #include <EEPROM.h>
+#include <Time.h>
+
 
 
 
@@ -11,9 +14,13 @@ const int ctrl_port_b = 5;
 
 
 static UC1701 lcd;
-EthernetClient client;
 
+EthernetUDP Udp;                     // A UDP instance to let us send and receive packets over UDP
+EthernetClient client;
 EthernetServer server(80);        // always at 80, despite serv_port value in cfg_struct
+
+#define NTP_PACKET_SIZE 48           // NTP time stamp is in the first 48 bytes of the message
+byte packetBuffer[ NTP_PACKET_SIZE]; // buffer to hold incoming and outgoing packets
 
 
 int backlightIntensity = 4;        // default LCD backlight intesity
@@ -44,24 +51,11 @@ cfg_struct cfg;
 
 
 
+
 void setup() {
   Serial.begin(115200);
-  //while (!Serial) {
-  //  ; // wait for serial port to connect. Needed for Leonardo only
-  //}
-
-
   Serial.print("Remotecon setup started");
-  /*pinMode(10, OUTPUT);     // change this to 53 on a mega
-  pinMode(4, OUTPUT);     // change this to 53 on a mega
-  pinMode(6, OUTPUT);     // change this to 53 on a mega
-  digitalWrite(10, HIGH);
-  digitalWrite(6, HIGH);
-  digitalWrite(4, HIGH);
-  delay(5000);
-  */
 
-  //backlightIntensity = 5; //0 to 5
   pinMode(backlightPin, OUTPUT); //set backlight pin to output
   analogWrite(backlightPin, (map(backlightIntensity, 0, 5, 255, 0))); //convert backlight intesity from a value of 0-5 to a value of 0-255 for PWM.
 
@@ -74,35 +68,34 @@ void setup() {
 
 
   if (EEPROM.read(0) != 0x01) {
-    lcd.setCursor(0, 1);
-    lcd.print("Fatal error:");
-    lcd.setCursor(0, 2);
-    lcd.print("EEPROM mismatch!");
-
+    lcd.setCursor(0, 7);
+    lcd.print("Fatal error EEPROM");
+  
   }
   else {
     //load config
     byte value;
     for (unsigned int i = 0; i < sizeof(cfg_struct); i++) {
       value = EEPROM.read(i);
-      //Serial.print(value, HEX);
       *((char*)&cfg + i) = value;
     }
 
-    //lcd.setCursor(0, 0);
-    //lcd.print("Config loaded");
     Serial.print("Config loaded");
 
   }
 
-  /*
-  Serial.print("MAC: ");
-  Serial.println(cfg.mac_addr);
-  Serial.print("server is at ");
-  Serial.println(cfg.ip_addr);
-  */
-
   Ethernet.begin(cfg.mac_addr, cfg.ip_addr, cfg.dns, cfg.gw_addr, cfg.netmask);
+ 
+  Udp.begin(8888);
+  // setup time synchronization, this is a call to the function that contacts the teim server
+  // synchronize time every 7200 seconds (2 hours)
+
+  setSyncProvider(getNTPtime);
+  setSyncInterval(7200);
+  
+  //while(timeStatus()== timeNotSet)
+  //  delay(100); // wait until the time is set by the sync provider
+
   Serial.print(cfg.serv_port);
   server = EthernetServer(cfg.serv_port);
   Serial.print("Ethernet server created");
@@ -119,9 +112,24 @@ void setup() {
   
 }
 
+
+void updateDisplay() {
+  lcd.setCursor(0,6);
+  lcd.print(hour());
+  lcd.print(':');
+  lcd.print(minute());
+  lcd.print(':');
+  lcd.print(second());
+
+
+}
+
 void loop() {
   // Just to show the program is alive...
   static int counter = 0;
+
+  delay(200);
+  updateDisplay();
 
   // Write a piece of text on the first line...
   //lcd.setCursor(0, 1);
@@ -171,3 +179,82 @@ void loop() {
     }
   }
 }
+
+
+
+/******************************************
+ * send an NTP request to the time server 
+ * at the given address 
+ ******************************************/
+// send an NTP request to the time server at the given address
+unsigned long sendNTPpacket(byte *address)
+{
+  // set all bytes in the buffer to 0
+  memset(packetBuffer, 0, NTP_PACKET_SIZE);
+  // Initialize values needed to form NTP request
+  // (see URL above for details on the packets)
+  packetBuffer[0] = 0b11100011;   // LI, Version, Mode
+  packetBuffer[1] = 0;     // Stratum, or type of clock
+  packetBuffer[2] = 6;     // Polling Interval
+  packetBuffer[3] = 0xEC;  // Peer Clock Precision
+  // 8 bytes of zero for Root Delay & Root Dispersion
+  packetBuffer[12]  = 49;
+  packetBuffer[13]  = 0x4E;
+  packetBuffer[14]  = 49;
+  packetBuffer[15]  = 52;
+
+  // all NTP fields have been given values, now
+  // you can send a packet requesting a timestamp:
+  Udp.sendPacket( packetBuffer,NTP_PACKET_SIZE,  address, 123); //NTP requests are to port 123
+} 
+
+
+
+
+
+
+
+/******************************************
+ * get the NTP time
+ ******************************************/
+
+unsigned long getNTPtime()   
+{  
+  Serial.println("Time synchronization starting");  
+  //IPAddress timeServer(64,147,116,229); // time.nist.gov NTP server  
+  sendNTPpacket(byte *(cfg.ntp_ip_addr); // send an NTP packet to a time server  
+  delay(1000);   
+  if ( Udp.parsePacket() ) {   
+   // We've received a packet, read the data from it  
+   Udp.read(packetBuffer,NTP_PACKET_SIZE); // read the packet into the buffer  
+
+   //the timestamp starts at byte 40 of the received packet and is four bytes,  
+   // or two words, long. First, esxtract the two words:  
+
+   unsigned long highWord = word(packetBuffer[40], packetBuffer[41]);  
+   unsigned long lowWord = word(packetBuffer[42], packetBuffer[43]);   
+   // combine the four bytes (two words) into a long integer  
+   // this is NTP time (seconds since Jan 1 1900):  
+   unsigned long secsSince1900 = highWord << 16 | lowWord;   
+   Serial.print("Seconds since Jan 1 1900 = " );  
+   Serial.println(secsSince1900);          
+
+   // now convert NTP time into everyday time:  
+   Serial.print("Unix time = ");  
+   // Unix time starts on Jan 1 1970. In seconds, that's 2208988800:  
+   const unsigned long seventyYears = 2208988800UL;     
+   // subtract seventy years:  
+   unsigned long epoch = secsSince1900 - seventyYears;   
+
+   //add correction for GMT+1  
+   epoch = epoch + 3600;  
+   //todo daylight saving time  
+
+   // print Unix time:  
+   Serial.println(epoch);                  
+   return epoch;  
+  }  
+  return 0;  
+}  
+
+
